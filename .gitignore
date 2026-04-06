@@ -1,3 +1,7 @@
 venv/
 __pycache__/
 *.pyc
+# Dataset (no subir a GitHub)
+data/raw/data/
+data/raw/*.txt
+data/processed/

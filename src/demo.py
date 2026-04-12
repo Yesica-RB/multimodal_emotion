@@ -11,6 +11,7 @@ import sys
 import cv2
 from PIL import Image
 from torchvision import models, transforms
+from transformers import pipeline
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import LabelEncoder
@@ -35,7 +36,7 @@ texts = [prep.preprocess(t) for t in df['text']]
 le    = LabelEncoder()
 y     = le.fit_transform(df['label'].tolist())
 
-X_train, X_test, y_train, _ = train_test_split(
+X_train, _, y_train, _ = train_test_split(
     texts, y, test_size=0.2, random_state=42, stratify=y)
 
 vec = TfidfVectorizer(max_features=10000, ngram_range=(1,2),
@@ -45,16 +46,36 @@ lr   = LogisticRegression(max_iter=1000, C=1.0, random_state=42)
 lr.fit(X_tr, y_train)
 print("Modelos de texto listos")
 
+# ── Cargar RoBERTa ──────────────────────────────────────────────
+print("Cargando RoBERTa Twitter LLM...")
+roberta = pipeline(
+    task='text-classification',
+    model='cardiffnlp/twitter-roberta-base-sentiment-latest',
+    truncation=True,
+    max_length=128
+)
+print("RoBERTa listo")
+
 # ── Cargar ResNet18 ─────────────────────────────────────────────
 print("Cargando ResNet18...")
 
 def build_resnet(num_classes):
     model = models.resnet18(weights=None)
-    # Sin Dropout — igual que como se guardó
     model.fc = nn.Linear(model.fc.in_features, num_classes)
     return model
 
-# ── Transforms ─────────────────────────────────────────────────
+resnet = None
+try:
+    checkpoint = torch.load(
+        'results/resnet18_model.pth', map_location=device)
+    resnet = build_resnet(checkpoint['num_classes'])
+    resnet.load_state_dict(checkpoint['model_state_dict'])
+    resnet.eval()
+    print("ResNet18 listo")
+except Exception as e:
+    print(f"ResNet18 no disponible: {e}")
+
+# ── Transforms ──────────────────────────────────────────────────
 VAL_TF = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
@@ -62,7 +83,7 @@ VAL_TF = transforms.Compose([
                          [0.229, 0.224, 0.225])
 ])
 
-# ── Grad-CAM ───────────────────────────────────────────────────
+# ── Grad-CAM ────────────────────────────────────────────────────
 def generate_gradcam(model, img_tensor, target_class):
     model.eval()
     img_tensor = img_tensor.unsqueeze(0).to(device)
@@ -75,7 +96,7 @@ def generate_gradcam(model, img_tensor, target_class):
         activations.append(output)
         output.register_hook(save_gradient)
 
-    hook = model.layer4.register_forward_hook(forward_hook)
+    hook   = model.layer4.register_forward_hook(forward_hook)
     output = model(img_tensor)
     model.zero_grad()
     output[0, target_class].backward()
@@ -83,12 +104,10 @@ def generate_gradcam(model, img_tensor, target_class):
 
     grad = gradients[0].squeeze().cpu().detach().numpy()
     act  = activations[0].squeeze().cpu().detach().numpy()
-    weights_cam = grad.mean(axis=(1, 2))
-
-    cam = np.zeros(act.shape[1:], dtype=np.float32)
-    for i, w in enumerate(weights_cam):
-        cam += w * act[i]
-
+    w    = grad.mean(axis=(1, 2))
+    cam  = np.zeros(act.shape[1:], dtype=np.float32)
+    for i, wi in enumerate(w):
+        cam += wi * act[i]
     cam = np.maximum(cam, 0)
     cam = cv2.resize(cam, (224, 224))
     cam -= cam.min()
@@ -100,77 +119,100 @@ def tensor_to_img(tensor):
     std  = np.array([0.229, 0.224, 0.225])
     img  = tensor.cpu().numpy().transpose(1, 2, 0)
     img  = std * img + mean
-    img  = np.clip(img, 0, 1)
-    return (img * 255).astype(np.uint8)
+    return (np.clip(img, 0, 1) * 255).astype(np.uint8)
 
-# ── Pesos SA ───────────────────────────────────────────────────
+# ── Pesos SA (5 módulos) ────────────────────────────────────────
 with open('results/metrics_fusion_sa.json') as f:
     sa_results = json.load(f)
+
 weights = np.array([
     sa_results['best_weights']['LR'],
     sa_results['best_weights']['BERT'],
     sa_results['best_weights']['SVM'],
-    sa_results['best_weights']['ResNet']
+    sa_results['best_weights']['ResNet'],
+    sa_results['best_weights']['RoBERTa']
 ])
 weights = weights / weights.sum()
 
-# ── Función principal ──────────────────────────────────────────
+# ── Función principal ───────────────────────────────────────────
 def predict(image, text):
     if not text or text.strip() == "":
         return "⚠️ Please enter a text.", {}, None
 
-    # --- Módulo texto (LR) ---
+    # NLP Classic (LR)
     clean    = prep.preprocess(text)
     x_vec    = vec.transform([clean])
     lr_proba = lr.predict_proba(x_vec)[0]
 
-    # Aproximación BERT
+    # BERT aproximación
     noise      = np.random.dirichlet(np.ones(3) * 8)
     bert_proba = 0.85 * lr_proba + 0.15 * noise
     bert_proba = bert_proba / bert_proba.sum()
 
-    # --- Módulo imagen (ResNet18) ---
-    gradcam_fig = None
-    if image is not None:
-        pil_img    = Image.fromarray(image).convert('RGB')
-        img_tensor = VAL_TF(pil_img)
+    # RoBERTa LLM — predicción real
+    label_map = {'negative': 0, 'neutral': 1, 'positive': 2}
+    try:
+        rob_result = roberta(text[:512])
+        rob_label  = rob_result[0]['label'].lower()
+        rob_idx    = label_map.get(rob_label, 1)
+        rob_score  = rob_result[0]['score']
+        rob_proba  = np.array([0.05, 0.05, 0.05])
+        rob_proba[rob_idx] = rob_score
+        remaining  = (1 - rob_score) / 2
+        for j in range(3):
+            if j != rob_idx:
+                rob_proba[j] = remaining
+        rob_proba = rob_proba / rob_proba.sum()
+    except Exception:
+        rob_proba = np.array([1/3, 1/3, 1/3])
 
-        with torch.no_grad():
-            output       = resnet(img_tensor.unsqueeze(0))
-            resnet_proba = torch.softmax(output, dim=1).squeeze().numpy()
+    # ResNet18 + Grad-CAM
+    gradcam_fig  = None
+    resnet_proba = np.ones(3) / 3
+    svm_proba    = np.ones(3) / 3
 
-        # Grad-CAM
-        target_class = int(np.argmax(resnet_proba))
-        cam          = generate_gradcam(resnet, img_tensor, target_class)
-        orig         = np.array(pil_img.resize((224, 224)))
-        heatmap      = cv2.applyColorMap(
-            np.uint8(255 * cam), cv2.COLORMAP_JET)
-        heatmap      = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
-        overlay      = (0.6 * orig + 0.4 * heatmap).astype(np.uint8)
+    if image is not None and resnet is not None:
+        try:
+            pil_img    = Image.fromarray(image).convert('RGB')
+            img_tensor = VAL_TF(pil_img)
 
-        fig, axes = plt.subplots(1, 3, figsize=(10, 3))
-        axes[0].imshow(orig)
-        axes[0].set_title('Original', fontsize=10)
-        axes[1].imshow(heatmap)
-        axes[1].set_title('Grad-CAM', fontsize=10)
-        axes[2].imshow(overlay)
-        axes[2].set_title(
-            f'Overlay ({CLASS_NAMES[target_class]})', fontsize=10)
-        for ax in axes:
-            ax.axis('off')
-        plt.suptitle('ResNet18 — Visual Attention Map',
-                     fontsize=11, fontweight='bold')
-        plt.tight_layout()
-        gradcam_fig = fig
+            with torch.no_grad():
+                output       = resnet(img_tensor.unsqueeze(0))
+                resnet_proba = torch.softmax(
+                    output, dim=1).squeeze().numpy()
 
-        svm_proba = np.ones(3) / 3
-    else:
-        resnet_proba = np.ones(3) / 3
-        svm_proba    = np.ones(3) / 3
+            target_class = int(np.argmax(resnet_proba))
+            cam          = generate_gradcam(
+                resnet, img_tensor, target_class)
+            orig    = np.array(pil_img.resize((224, 224)))
+            heatmap = cv2.applyColorMap(
+                np.uint8(255 * cam), cv2.COLORMAP_JET)
+            heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+            overlay = (0.6 * orig + 0.4 * heatmap).astype(np.uint8)
 
-    # --- Fusión con pesos SA ---
-    probas_list = [lr_proba, bert_proba, svm_proba, resnet_proba]
-    fusion      = sum(w * p for w, p in zip(weights, probas_list))
+            fig, axes = plt.subplots(1, 3, figsize=(10, 3))
+            axes[0].imshow(orig)
+            axes[0].set_title('Original', fontsize=10)
+            axes[1].imshow(heatmap)
+            axes[1].set_title('Grad-CAM', fontsize=10)
+            axes[2].imshow(overlay)
+            axes[2].set_title(
+                f'Overlay ({CLASS_NAMES[target_class]})',
+                fontsize=10)
+            for ax in axes:
+                ax.axis('off')
+            plt.suptitle('ResNet18 — Visual Attention',
+                         fontsize=11, fontweight='bold')
+            plt.tight_layout()
+            gradcam_fig = fig
+        except Exception as e:
+            print(f"Error ResNet: {e}")
+
+    # Fusión con pesos SA
+    probas_list = [lr_proba, bert_proba, svm_proba,
+                   resnet_proba, rob_proba]
+    fusion      = sum(w * p for w, p
+                      in zip(weights, probas_list))
     fusion      = fusion / fusion.sum()
 
     pred_idx   = np.argmax(fusion)
@@ -178,7 +220,7 @@ def predict(image, text):
     emoji      = EMOJIS[pred_class]
     confidence = fusion[pred_idx] * 100
 
-    # --- Resultado ---
+    # Resultado
     result  = f"## {emoji} {pred_class.upper()}\n\n"
     result += f"**Confidence:** {confidence:.1f}%\n\n---\n\n"
     result += f"**Module breakdown:**\n\n"
@@ -188,7 +230,10 @@ def predict(image, text):
     result += f"- 🟣 BERT Fine-tuned: "
     result += f"**{CLASS_NAMES[np.argmax(bert_proba)]}** "
     result += f"({bert_proba[np.argmax(bert_proba)]*100:.0f}%)\n"
-    if image is not None:
+    result += f"- 🤖 RoBERTa LLM: "
+    result += f"**{CLASS_NAMES[np.argmax(rob_proba)]}** "
+    result += f"({rob_proba[np.argmax(rob_proba)]*100:.0f}%)\n"
+    if image is not None and resnet is not None:
         result += f"- 🟠 ResNet18: "
         result += f"**{CLASS_NAMES[np.argmax(resnet_proba)]}** "
         result += f"({resnet_proba[np.argmax(resnet_proba)]*100:.0f}%)\n"
@@ -204,7 +249,7 @@ def predict(image, text):
 
     return result, proba_dict, gradcam_fig
 
-# ── Interfaz Gradio ────────────────────────────────────────────
+# ── Interfaz Gradio ─────────────────────────────────────────────
 with gr.Blocks(title="Multimodal Emotion Recognition") as demo:
 
     gr.Markdown("""
@@ -218,15 +263,12 @@ with gr.Blocks(title="Multimodal Emotion Recognition") as demo:
         with gr.Column(scale=2):
             image_input = gr.Image(
                 label="Upload a travel image (optional)",
-                type="numpy",
-                height=200
-            )
+                type="numpy", height=200)
             text_input = gr.Textbox(
                 label="Enter the tweet caption",
                 placeholder="e.g. Amazing sunset at the beach! "
                             "Best trip ever #travel #happy",
-                lines=2
-            )
+                lines=2)
             submit_btn = gr.Button(
                 "🔍 Predict Emotion", variant="primary")
 
@@ -236,10 +278,11 @@ with gr.Blocks(title="Multimodal Emotion Recognition") as demo:
             | Module | F1 |
             |---|---|
             | NLP Classic | 0.61 |
+            | RoBERTa LLM | 0.67 |
             | BERT | 0.72 |
             | CV Classic | 0.40 |
             | ResNet18 | 0.43 |
-            | **Fusion (SA)** | **0.74** |
+            | **Fusion (SA)** | **0.75** |
             """)
 
     with gr.Row():
@@ -253,7 +296,7 @@ with gr.Blocks(title="Multimodal Emotion Recognition") as demo:
     gradcam_output = gr.Plot(
         label="Grad-CAM Visual Attention (only with image)")
 
-    gr.Markdown("---\n### 💡 Try these text examples:")
+    gr.Markdown("---\n### 💡 Try these examples:")
     gr.Examples(
         examples=[
             [None, "Amazing sunset at the beach! Best trip ever #travel #happy"],
@@ -273,7 +316,7 @@ with gr.Blocks(title="Multimodal Emotion Recognition") as demo:
 
     gr.Markdown("""
     ---
-    *(UIE) · 
+    *Universidad Internacional de España (UIE) · 
     Grado en Ingeniería en Sistemas Inteligentes · 
     Yésica Ramírez Bernal*
     """)

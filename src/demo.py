@@ -316,7 +316,7 @@ with gr.Blocks(title="Multimodal Emotion Recognition") as demo:
 
     gr.Markdown("""
     ---
-    *Universidad Internacional de España (UIE) · 
+    *(UIE) · 
     Grado en Ingeniería en Sistemas Inteligentes · 
     Yésica Ramírez Bernal*
     """)

@@ -15,11 +15,9 @@
 - [Project Structure](#project-structure)
 - [Setup and Installation](#setup-and-installation)
 - [How to Run](#how-to-run)
-- [Notebooks Execution Order](#notebooks-execution-order)
 - [Demo Application](#demo-application)
 - [Dataset](#dataset)
 - [Modules](#modules)
-- [Technologies](#technologies)
 
 ---
 
@@ -184,21 +182,6 @@ source venv/bin/activate  # macOS/Linux
 pip install -r requirements.txt
 ```
 
-### requirements.txt
-```
-torch>=2.0.0
-torchvision>=0.15.0
-transformers>=4.35.0
-gradio>=4.0.0
-scikit-learn>=1.3.0
-opencv-python>=4.8.0
-pandas>=2.0.0
-numpy>=1.24.0
-matplotlib>=3.7.0
-Pillow>=10.0.0
-nltk>=3.8.0
-```
-
 ---
 
 ## How to Run
@@ -218,34 +201,6 @@ python src/demo.py
 ```
 
 The demo will load all models and open at `http://localhost:7860`. A public shareable URL is also generated.
-
----
-
-## Notebooks Execution Order
-
-> ⚠️ All 5 JSON result files must exist in `results/` before running notebook 06.
-
-### On your Mac (in order):
-
-```
-01_eda.ipynb          → EDA figures
-02_nlp_classic.ipynb  → results/metrics_nlp_classic.json
-04_cv_classic.ipynb   → results/metrics_cv_classic.json   (~15 min)
-07_llm.ipynb          → results/metrics_llm.json          (~10 min)
-```
-
-### On Google Colab (T4 GPU required):
-
-```
-03_bert.ipynb   → download metrics_bert.json to results/            (~20 min)
-05_resnet.ipynb → download metrics_resnet.json + resnet18_model.pth (~15 min)
-```
-
-### Back on your Mac:
-
-```
-06_fusion.ipynb → results/metrics_fusion_sa.json  (~2 min)
-```
 
 ---
 
@@ -290,21 +245,6 @@ Example predictions:
 | CV Classic | Computer Vision | HSV + Canny + k-means + RBF-SVM | 0.37 |
 | ResNet18 | Deep Learning | Transfer learning from ImageNet + Grad-CAM | 0.39 |
 | **Late Fusion** | **Intelligent Systems** | **Rational agent + Simulated Annealing** | **0.76** |
-
----
-
-## Technologies
-
-| Technology | Version | Use |
-|---|---|---|
-| Python | 3.11 | Main language |
-| PyTorch | 2.0 | BERT, ResNet18 |
-| HuggingFace Transformers | 4.35 | BERT, RoBERTa |
-| scikit-learn | 1.3 | TF-IDF, SVM, LR, Grid Search |
-| OpenCV | 4.8 | HSV histogram, Canny, k-means, Grad-CAM |
-| Gradio | 4.x | Demo interface |
-| NLTK | 3.8 | Tokenisation, stopwords, stemming |
-| Google Colab | T4 GPU | BERT and ResNet18 training |
 
 ---
 

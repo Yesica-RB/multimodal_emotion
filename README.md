@@ -150,11 +150,6 @@ multimodal_emotion/
 │       ├── fusion_comparison.png
 │       └── llm_comparison.png
 │
-├── paper/
-│   ├── main.tex
-│   ├── references.bib
-│   └── figures/               ← same figures as results/figures/
-│
 ├── requirements.txt
 └── README.md
 ```

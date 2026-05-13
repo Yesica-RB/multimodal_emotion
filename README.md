@@ -1,4 +1,4 @@
-# 🌍 Multimodal Emotion Recognition
+# 😊 Multimodal Emotion Recognition
 
 **Detecting emotions in travel Twitter posts using NLP, Computer Vision, Deep Learning, and Intelligent Systems**
 
